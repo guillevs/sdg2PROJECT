@@ -1,0 +1,365 @@
+#include <stdlib.h>  // para el NULL
+#include <wiringPi.h>
+#include "fsm.h"
+#include "tmr.h"
+#include <stdio.h>
+#include <unistd.h>
+
+#define CLK_MS 						10
+/*hemos usado los leds que aparecen como libres en la tabla*/
+#define GPIO_BUTTON_START_END		19
+#define GPIO_BUTTON_C1				20
+#define GPIO_BUTTON_C2				21
+#define GPIO_BUTTON_C3				26
+#define GPIO_BUTTON_C4				16
+
+#define GPIO_LIGHT_START_END		17		/*led verde START/END encendido desde
+el principio */
+#define GPIO_LIGHT_L1				18		/*led rojo 1*/
+#define GPIO_LIGHT_L2				22		/*led rojo 2*/
+#define GPIO_LIGHT_L3				23		/*led rojo 3*/
+#define GPIO_LIGHT_L4				24		/*led rojo 4*/
+
+#define GPIO_BUZZER					7
+
+
+
+int FLAG_START = 0;
+int FLAG_B = 0;
+int FLAG_TIMER = 0;
+
+#define max_fallos 						3
+#define max_rondas 						10
+#define penalizacion 					300
+
+int num_fallos = 0;
+int num_rondas = 0;
+int pulsados = 0;
+
+int tiempoLimite = 10000;
+int tiempo_inicial = 0;
+int tiempo_final = 0;
+int tiempo = 0;
+int tiempos[max_rondas] ;
+int leds[4] = {GPIO_LIGHT_L1,GPIO_LIGHT_L2,GPIO_LIGHT_L3,GPIO_LIGHT_L4};
+int botones[4]  = {GPIO_BUTTON_C1, GPIO_BUTTON_C2, GPIO_BUTTON_C3, GPIO_BUTTON_C4};
+
+int ledSeleccionado = 0;
+int maximo = 0;
+int minimo = 0;
+int tiempoTotal = 0;
+int tiempoMedio = 0;
+
+int encendido  = 0;
+
+
+
+/*estados de la maquina de Mealy*/
+enum fsm_state {
+	WAIT_START, WAIT_PUSH, WAIT_END, EXCTN_WAIT_END,
+};
+
+void apagar() {
+
+	digitalWrite (GPIO_LIGHT_START_END, 0);
+	digitalWrite (GPIO_LIGHT_L1, 0);
+	digitalWrite (GPIO_LIGHT_L2, 0);
+	digitalWrite (GPIO_LIGHT_L3, 0);
+	digitalWrite (GPIO_LIGHT_L4, 0);
+}
+//Condiciones para la excepcion
+
+int excepcion(){
+	if((num_fallos>max_fallos)||(num_rondas>max_rondas)||(pulsados>1)){
+		return 1;
+	}
+	return 0;
+}
+int finJuego(){
+	if((num_fallos==max_fallos)||
+			(num_rondas==max_rondas)){
+		return 1;
+	}
+	return 0;
+}
+
+//Activacion de FLAGS
+
+void button_start_isr(void) {
+	FLAG_START = 1;
+	pulsados ++;
+}
+
+void button_c1_isr(void) {
+	FLAG_B = 1;
+	pulsados ++;
+}
+
+void button_c2_isr(void) {
+	FLAG_B = 2;
+	pulsados ++;
+}
+
+void button_c3_isr(void) {
+	FLAG_B = 3;
+	pulsados ++;
+}
+
+void button_c4_isr(void) {
+	FLAG_B = 4;
+	pulsados ++;
+}
+
+void timer_isr(union sigval value) {
+	FLAG_TIMER = 1;
+}
+
+/*
+Comprobacion de FLAGS
+ */
+int EVENT_BTN_START_END(fsm_t* this) {
+	if(FLAG_START){
+		return 1;
+	}
+	return 0;
+}
+int EVENT_BTN_FAIL(fsm_t* this) {
+	int timeout = millis() - tiempo_inicial;
+	if(timeout>tiempoLimite){
+		encendido=0;
+		return 1;
+	}
+	if ((FLAG_B!=encendido)&&(FLAG_B!=0)){
+		encendido=0;
+		printf("Estoy leyendo fallo");
+		fflush(stdout);
+		return 1;
+	}
+	return 0;
+}
+int EVENT_BTN_OK(fsm_t* this) {
+	if (FLAG_B==encendido){
+		encendido=0;
+		printf("Estoy leyendo acierto");
+		return 1;
+	}
+	return 0;
+}
+
+int EVENT_EXCEPTION(fsm_t* this) {
+	if(excepcion()){
+		return 1;
+	}
+	return 0;
+}
+int EVENT_END_GAME (fsm_t* this) {
+	if(finJuego()){
+		return 1;
+	}
+	return 0;
+}
+
+
+// Acciones si transicion
+void S1E1(fsm_t* this) {
+	digitalWrite(GPIO_LIGHT_START_END,0);
+
+	srand(time(NULL));				// Se calcula un numero aleatorio
+	ledSeleccionado = rand()%4;
+	switch(ledSeleccionado){
+	case 0:
+		digitalWrite(GPIO_LIGHT_L1, 1);
+		encendido=1;
+		tiempo_inicial = millis();
+		FLAG_START=0;
+		break;
+	case 1:
+		digitalWrite(GPIO_LIGHT_L2, 1);
+		encendido=2;
+		tiempo_inicial = millis();
+		FLAG_START=0;
+		break;
+	case 2:
+		digitalWrite(GPIO_LIGHT_L3, 1);
+		encendido=3;
+		tiempo_inicial = millis();
+		FLAG_START=0;
+		break;
+	case 3:
+		digitalWrite(GPIO_LIGHT_L4, 1);
+		encendido=4;
+		tiempo_inicial = millis();
+		FLAG_START=0;
+		break;
+	}
+	pulsados = 0;
+}
+void S2E3(fsm_t* this) {
+	//se obtiene el tiempo
+	tiempo_final = millis();
+	tiempo = tiempo_final - tiempo_inicial;
+	tiempo += penalizacion;
+	tiempos[num_rondas]=tiempo;
+
+	tiempoLimite -= tiempoLimite * 0.1;
+	num_fallos++;
+	num_rondas++;
+	digitalWrite(leds[ledSeleccionado],0);
+	digitalWrite(GPIO_BUZZER,1);
+	delay(500);
+	digitalWrite(GPIO_BUZZER,0);
+	FLAG_B = 0;
+	S1E1(this);
+	pulsados = 0;
+}
+void S2E2(fsm_t* this) {
+	tiempo_final = millis();
+	tiempo = tiempo_final - tiempo_inicial;
+	tiempos[num_rondas]=tiempo;
+
+	tiempoLimite -= tiempoLimite * 0.1;
+	num_rondas++;
+	digitalWrite(leds[ledSeleccionado],0);
+	delay(500);
+	FLAG_B = 0;
+	S1E1(this);
+	pulsados = 0;
+}
+void S2E5(fsm_t* this) {
+
+	//Encender el LED START parpadeando
+	while(1){
+		delay(500);
+		digitalWrite(GPIO_LIGHT_START_END,1);
+		delay(500);
+		digitalWrite(GPIO_LIGHT_START_END,0);
+	}
+	ledSeleccionado = 0;
+	FLAG_START=0;
+	pulsados = 0;
+
+	//Presentar el tipo de error
+	if(num_fallos>max_fallos){
+		printf("Se ha excedido el nmero de fallos permitidos ( %i )\n", num_fallos);
+	}
+	if(num_rondas>max_rondas){
+		printf("Se ha excedido el nmero de rondas permitidas ( %i )\n", num_rondas);
+	}
+	if(pulsados>1){
+		printf("Has pulsado %i botones a la vez, solo se permite pulsar uno\n", pulsados);
+	}
+
+}
+void S3E1(fsm_t* this) {
+	int n;
+	minimo = tiempoLimite;
+	for(n=0; n<num_rondas; n++){
+		if(maximo<tiempos[n]){
+			maximo = tiempos[n];
+			//printf("%i", maximo);
+			fflush(stdout);
+		}
+		if(minimo>tiempos[n]){
+			minimo = tiempos[n];
+			//printf("%i", minimo);
+			fflush(stdout);
+		}
+		tiempoTotal += tiempos[n];
+		tiempoMedio = tiempoTotal/num_rondas;
+	}
+
+	int num_aciertos = num_rondas-num_fallos;
+
+  //Muestra los resultados
+  	printf("El tiempo medio de respuesta es: %i\n", tiempoMedio);
+  	printf("El tiempo maximo de respuesta ha sido: %i\n", maximo);
+  	printf("El tiempo minimo de respuesta ha sido: %i\n", minimo);
+  	printf("El numero de fallos ha sido: %i\n", num_fallos);
+  	printf("El numero de aciertos ha sido: %i\n", num_aciertos);
+  	FLAG_START=0;
+  	pulsados = 0;
+  	num_fallos=0;
+  	num_rondas=0;
+  	encendido=0;
+  	for(n=0; n<num_rondas; n++){
+  		tiempos[n] = 0;
+  	}
+
+}
+void S2E4(fsm_t* this) {
+	//imprime estadisticas
+	apagar();
+	digitalWrite(GPIO_LIGHT_START_END,1);	//Encender el LED START
+	ledSeleccionado = 0;
+	FLAG_START=0;
+	pulsados = 0;
+}
+
+void delay_until (unsigned int next)
+{
+  unsigned int now = millis();
+  if (next > now) {
+	 delay (next - now);
+  }
+}
+
+
+int main() {
+
+	/* Maquina de estados: lista de transiciones*/
+	/* {EstadoOrigen, CondicionDeDisparo, EstadoFinal, AccionesSiTransicion }*/
+	fsm_trans_t tv_tt[] = {
+			{ WAIT_START,  EVENT_BTN_START_END , WAIT_PUSH, S1E1},
+			{ WAIT_PUSH,   EVENT_BTN_FAIL , WAIT_PUSH, S2E3 },
+			{ WAIT_PUSH,   EVENT_BTN_OK , WAIT_PUSH, S2E2 },
+			{ WAIT_PUSH, 	EVENT_EXCEPTION, EXCTN_WAIT_END, S2E5 },
+			{ WAIT_PUSH, 	EVENT_END_GAME, WAIT_END, S2E4 },
+			{ EXCTN_WAIT_END, EVENT_BTN_START_END, WAIT_START, S3E1 },
+			{ WAIT_END, 	EVENT_BTN_START_END , WAIT_START, S3E1 },
+			{-1, NULL, -1, NULL },
+	};
+
+//Instancia de la maquina de estados
+	tmr_t* tmr = tmr_new (timer_isr);
+	fsm_t* tmr_fsm = fsm_new (WAIT_START,tv_tt , tmr);
+	unsigned int next;
+
+/*Configuracion de GPIO: modo, interrupciones
+Ejecutar funcion para inicializar los recursos: salidas, timer, flags*/
+
+	wiringPiSetupGpio();
+
+	pinMode (GPIO_BUTTON_START_END, INPUT);
+	pinMode (GPIO_BUTTON_C1, INPUT);
+	pinMode (GPIO_BUTTON_C2, INPUT);
+	pinMode (GPIO_BUTTON_C3, INPUT);
+	pinMode (GPIO_BUTTON_C4, INPUT);
+
+	pinMode (GPIO_LIGHT_START_END, OUTPUT);
+	pinMode (GPIO_LIGHT_L1, OUTPUT);
+	pinMode (GPIO_LIGHT_L2, OUTPUT);
+	pinMode (GPIO_LIGHT_L3, OUTPUT);
+	pinMode (GPIO_LIGHT_L4, OUTPUT);
+
+	wiringPiISR (GPIO_BUTTON_START_END, INT_EDGE_FALLING, button_start_isr);
+	wiringPiISR (GPIO_BUTTON_C1, INT_EDGE_FALLING, button_c1_isr);
+	wiringPiISR (GPIO_BUTTON_C2, INT_EDGE_FALLING, button_c2_isr);
+	wiringPiISR (GPIO_BUTTON_C3, INT_EDGE_FALLING, button_c3_isr);
+	wiringPiISR (GPIO_BUTTON_C4, INT_EDGE_FALLING, button_c4_isr);
+
+	apagar (tmr_fsm);
+
+	digitalWrite(GPIO_LIGHT_START_END,1);
+	ledSeleccionado = 1;
+	next = millis();
+	while (1) {
+		fsm_fire(tmr_fsm);
+		next += CLK_MS;
+		delay_until(next);
+	}
+
+	apagar (tmr_fsm);
+	/* Destruir user_data
+	Destruir maquina de estados*/
+	tmr_destroy ((tmr_t*)(tmr_fsm->user_data));
+	fsm_destroy (tmr_fsm);
